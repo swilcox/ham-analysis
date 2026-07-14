@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Project data (large / regenerable)
+data/raw/
+data/processed/
+data/external/
+*.duckdb
+*.duckdb.wal
+
+# Outputs (regenerable; keep directory via .gitkeep)
+# Published site is built in CI and deployed to GitHub Pages — not committed.
+outputs/tables/*
+outputs/maps/*
+outputs/site/*
+!outputs/tables/.gitkeep
+!outputs/maps/.gitkeep
+!outputs/site/.gitkeep
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.env
+.env.*
