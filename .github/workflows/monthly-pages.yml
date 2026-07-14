@@ -1,0 +1,82 @@
+# Rebuild FCC/Census analysis monthly and publish the static site to GitHub Pages.
+#
+# One-time repo setup (after first push):
+#   1. Settings → Pages → Build and deployment → Source: GitHub Actions
+#   2. Optionally run this workflow via Actions → "Monthly site build" → Run workflow
+#
+# Permissions: the default GITHUB_TOKEN needs pages:write and id-token:write
+# (declared below). Public repos are fine on free Actions minutes for a monthly run.
+
+name: Monthly site build
+
+on:
+  schedule:
+    # 12:00 UTC on the 1st of each month
+    - cron: "0 12 1 * *"
+  workflow_dispatch:
+    inputs:
+      months:
+        description: "Growth window in months (new grants)"
+        required: false
+        default: "12"
+      force:
+        description: "Force re-download of FCC/Census data"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Run full pipeline
+        env:
+          MONTHS: ${{ github.event.inputs.months || '12' }}
+          FORCE_FLAG: ${{ github.event.inputs.force == 'false' && '' || '--force' }}
+        run: |
+          set -euo pipefail
+          # schedule events have empty inputs — always force refresh on the monthly cron
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            ham all --months 12 --force
+          else
+            ham all --months "${MONTHS}" ${FORCE_FLAG}
+          fi
+          ham site --months "${MONTHS:-12}"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: outputs/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
