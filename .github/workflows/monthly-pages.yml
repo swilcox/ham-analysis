@@ -40,10 +40,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # v5+ runs on Node 24 (v4 targeted deprecated Node 20)
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -66,7 +67,8 @@ jobs:
           ham site --months "${MONTHS:-12}"
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        # v5 uses upload-artifact@v7 / Node 24 (v3 pulled in Node 20 upload-artifact@v4)
+        uses: actions/upload-pages-artifact@v5
         with:
           path: outputs/site
 
@@ -79,4 +81,5 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        # v5 targets Node 24
+        uses: actions/deploy-pages@v5
