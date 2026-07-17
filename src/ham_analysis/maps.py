@@ -29,6 +29,7 @@ from ham_analysis.config import (
     METRICS_COUNTY_PARQUET,
     METRICS_STATE_PARQUET,
     OUTPUT_MAPS,
+    STATE_FIPS_TO_POSTAL,
     ensure_dirs,
 )
 from ham_analysis.download_census import find_shp
@@ -387,17 +388,17 @@ def make_maps(*, months: int = DEFAULT_GROWTH_MONTHS) -> list[Path]:
     counties = counties[counties["STATEFP"].isin(STATE_FIPS_KEEP)].copy()
 
     states["label"] = states["NAME"]
-    if "state" in counties.columns:
-        counties["label"] = counties.apply(
-            lambda r: (
-                f"{r['NAME']}, {r['state']}"
-                if pd.notna(r.get("state"))
-                else str(r["NAME"])
-            ),
-            axis=1,
-        )
-    else:
-        counties["label"] = counties["NAME"]
+    # Prefer metrics.state (already FIPS-derived); fall back to boundary STATEFP
+    # so labels never depend on FCC mailing-address state.
+    def _county_label(row: pd.Series) -> str:
+        postal = row.get("state")
+        if pd.isna(postal) or not postal:
+            postal = STATE_FIPS_TO_POSTAL.get(str(row.get("STATEFP", "")).zfill(2))
+        if postal:
+            return f"{row['NAME']}, {postal}"
+        return str(row["NAME"])
+
+    counties["label"] = counties.apply(_county_label, axis=1)
 
     written: list[Path] = []
 

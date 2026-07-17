@@ -39,7 +39,8 @@ def pipeline_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "02108,25025,25,1\n"
         "02139,25017,25,1\n"
         "04101,23005,23,1\n"
-        "98101,53033,53,1\n",
+        "98101,53033,53,1\n"
+        "99156,53051,53,1\n",
         encoding="utf-8",
     )
     (raw_census / "acs_population_state.csv").write_text(
@@ -54,7 +55,8 @@ def pipeline_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         '"Suffolk County, Massachusetts",800000,25,025,25025\n'
         '"Middlesex County, Massachusetts",1600000,25,017,25017\n'
         '"Cumberland County, Maine",300000,23,005,23005\n'
-        '"King County, Washington",2300000,53,033,53033\n',
+        '"King County, Washington",2300000,53,033,53033\n'
+        '"Pend Oreille County, Washington",14000,53,051,53051\n',
         encoding="utf-8",
     )
     (raw_census / "county_age.csv").write_text(
@@ -62,7 +64,8 @@ def pipeline_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "25025,34.5,12.0,96000,800000\n"
         "25017,39.0,15.0,240000,1600000\n"
         "23005,42.0,20.0,60000,300000\n"
-        "53033,37.0,13.0,299000,2300000\n",
+        "53033,37.0,13.0,299000,2300000\n"
+        "53051,49.5,27.0,3800,14000\n",
         encoding="utf-8",
     )
 
@@ -126,10 +129,13 @@ def test_load_uls_filters_inactive_and_joins(pipeline_env: Path):
     con = duckdb.connect()
     df = con.execute(f"SELECT * FROM read_parquet('{path}') ORDER BY call_sign").fetchdf()
     # K1CCC is expired (status E) — excluded
-    assert set(df["call_sign"]) == {"K1AAA", "K1BBB", "W1DDD"}
+    assert set(df["call_sign"]) == {"K1AAA", "K1BBB", "KF6KAL", "W1DDD"}
     assert df.loc[df["call_sign"] == "K1AAA", "operator_class"].iloc[0] == "E"
     assert df.loc[df["call_sign"] == "K1AAA", "state"].iloc[0] == "MA"
     assert df.loc[df["call_sign"] == "K1AAA", "zip5"].iloc[0] == "02108"
+    # FCC address state can disagree with ZIP (KF6KAL: CA + 99156 WA)
+    assert df.loc[df["call_sign"] == "KF6KAL", "state"].iloc[0] == "CA"
+    assert df.loc[df["call_sign"] == "KF6KAL", "zip5"].iloc[0] == "99156"
 
 
 def test_geo_and_aggregate(pipeline_env: Path):
@@ -144,20 +150,66 @@ def test_geo_and_aggregate(pipeline_env: Path):
     states = con.execute(
         f"SELECT * FROM read_parquet('{state_p}') ORDER BY state"
     ).fetchdf()
-    # MA has 2 active, WA 1; ME only had expired
+    # MA has 2 active; WA has W1DDD + KF6KAL (ZIP-placed); ME only had expired
     ma = states[states["state"] == "MA"].iloc[0]
     assert ma["license_count"] == 2
     # Window 2024-01-01..2025-01-01: K1BBB (2024-06-01) counts; K1AAA (2020) does not
     assert ma["new_grants"] == 1
     wa = states[states["state"] == "WA"].iloc[0]
-    assert wa["license_count"] == 1
-    # W1DDD grant 2023-11-20 is outside the 12-month window ending 2025-01-01
+    assert wa["license_count"] == 2
+    # W1DDD grant 2023-11-20 and KF6KAL 2022 are outside the 12-month window
     assert wa["new_grants"] == 0
 
     counties = con.execute(
         f"SELECT * FROM read_parquet('{county_p}') WHERE county_fips = '25025'"
     ).fetchdf()
     assert abs(float(counties.iloc[0]["median_age"]) - 34.5) < 0.01
+
+
+def test_metrics_state_from_fips_not_fcc_address(pipeline_env: Path):
+    """County/state postal labels follow FIPS placement, not FCC state.
+
+    Regression: KF6KAL has FCC state=CA but ZIP 99156 → Pend Oreille, WA.
+    Metrics must label the county WA, never CA via ANY_VALUE(state).
+    """
+    load_uls(force=True)
+    geo_join(force=True)
+    _, county_p = aggregate(months=12, force=True, as_of=date(2025, 1, 1))
+
+    con = duckdb.connect()
+    geo = con.execute(
+        "SELECT call_sign, state AS fcc_state, county_fips, state_fips "
+        f"FROM read_parquet('{config.GEO_LICENSES_PARQUET}') "
+        "WHERE call_sign = 'KF6KAL'"
+    ).fetchdf()
+    assert len(geo) == 1
+    assert geo.iloc[0]["fcc_state"] == "CA"
+    assert geo.iloc[0]["county_fips"] == "53051"
+    assert geo.iloc[0]["state_fips"] == "53"
+
+    po = con.execute(
+        f"SELECT state, state_fips, license_count FROM read_parquet('{county_p}') "
+        "WHERE county_fips = '53051'"
+    ).fetchdf()
+    assert len(po) == 1
+    assert po.iloc[0]["state"] == "WA"
+    assert po.iloc[0]["state_fips"] == "53"
+    assert int(po.iloc[0]["license_count"]) == 1
+
+    # Every metrics county with a state_fips must have matching postal
+    from ham_analysis.config import STATE_FIPS_TO_POSTAL
+
+    all_c = con.execute(
+        f"SELECT county_fips, state, state_fips FROM read_parquet('{county_p}') "
+        "WHERE state_fips IS NOT NULL"
+    ).fetchdf()
+    for _, row in all_c.iterrows():
+        expected = STATE_FIPS_TO_POSTAL.get(str(row["state_fips"]).zfill(2))
+        if expected is not None:
+            assert row["state"] == expected, (
+                f"{row['county_fips']}: state={row['state']!r} "
+                f"expected {expected!r} for FIPS {row['state_fips']}"
+            )
 
 
 def test_analyze_age(pipeline_env: Path):

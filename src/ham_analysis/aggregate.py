@@ -18,6 +18,7 @@ from ham_analysis.config import (
     METRICS_STATE_CSV,
     METRICS_STATE_PARQUET,
     ensure_dirs,
+    state_fips_lookup_sql,
 )
 
 
@@ -59,6 +60,17 @@ def aggregate(
             SELECT * FROM read_parquet('{_sql(GEO_LICENSES_PARQUET)}')
             """
         )
+        # Postal labels come from state_fips only — never from FCC address state.
+        # (A minority of licenses have state/ZIP disagreements; ANY_VALUE(state)
+        # could label e.g. Pend Oreille WA as CA.)
+        con.execute(
+            f"""
+            CREATE OR REPLACE TABLE state_fips_lookup AS
+            SELECT * FROM (VALUES
+                {state_fips_lookup_sql()}
+            ) AS t(state, state_fips)
+            """
+        )
         as_of_s = as_of.isoformat()
         m = int(months)
 
@@ -66,49 +78,51 @@ def aggregate(
             f"""
             CREATE OR REPLACE TABLE metrics_state AS
             SELECT
-                state_fips,
-                ANY_VALUE(state) AS state,
-                ANY_VALUE(state_name) AS state_name,
-                ANY_VALUE(state_population) AS population,
+                LPAD(CAST(g.state_fips AS VARCHAR), 2, '0') AS state_fips,
+                s.state AS state,
+                ANY_VALUE(g.state_name) AS state_name,
+                ANY_VALUE(g.state_population) AS population,
                 COUNT(*) AS license_count,
                 COUNT(*) FILTER (
-                    WHERE grant_date IS NOT NULL
-                      AND grant_date > DATE '{as_of_s}' - INTERVAL {m} MONTH
-                      AND grant_date <= DATE '{as_of_s}'
+                    WHERE g.grant_date IS NOT NULL
+                      AND g.grant_date > DATE '{as_of_s}' - INTERVAL {m} MONTH
+                      AND g.grant_date <= DATE '{as_of_s}'
                 ) AS new_grants,
                 ROUND(
-                    100000.0 * COUNT(*) / NULLIF(ANY_VALUE(state_population), 0),
+                    100000.0 * COUNT(*) / NULLIF(ANY_VALUE(g.state_population), 0),
                     2
                 ) AS licenses_per_100k,
                 ROUND(
                     100000.0 * COUNT(*) FILTER (
-                        WHERE grant_date IS NOT NULL
-                          AND grant_date > DATE '{as_of_s}' - INTERVAL {m} MONTH
-                          AND grant_date <= DATE '{as_of_s}'
-                    ) / NULLIF(ANY_VALUE(state_population), 0),
+                        WHERE g.grant_date IS NOT NULL
+                          AND g.grant_date > DATE '{as_of_s}' - INTERVAL {m} MONTH
+                          AND g.grant_date <= DATE '{as_of_s}'
+                    ) / NULLIF(ANY_VALUE(g.state_population), 0),
                     2
                 ) AS new_grants_per_100k,
                 ROUND(
-                    100.0 * COUNT(*) FILTER (WHERE operator_class = 'T')
+                    100.0 * COUNT(*) FILTER (WHERE g.operator_class = 'T')
                         / NULLIF(COUNT(*), 0),
                     2
                 ) AS pct_technician,
                 ROUND(
-                    100.0 * COUNT(*) FILTER (WHERE operator_class = 'G')
+                    100.0 * COUNT(*) FILTER (WHERE g.operator_class = 'G')
                         / NULLIF(COUNT(*), 0),
                     2
                 ) AS pct_general,
                 ROUND(
-                    100.0 * COUNT(*) FILTER (WHERE operator_class = 'E')
+                    100.0 * COUNT(*) FILTER (WHERE g.operator_class = 'E')
                         / NULLIF(COUNT(*), 0),
                     2
                 ) AS pct_extra,
-                COUNT(*) FILTER (WHERE operator_class = 'T') AS count_technician,
-                COUNT(*) FILTER (WHERE operator_class = 'G') AS count_general,
-                COUNT(*) FILTER (WHERE operator_class = 'E') AS count_extra
-            FROM geo_licenses
-            WHERE state_fips IS NOT NULL
-            GROUP BY state_fips
+                COUNT(*) FILTER (WHERE g.operator_class = 'T') AS count_technician,
+                COUNT(*) FILTER (WHERE g.operator_class = 'G') AS count_general,
+                COUNT(*) FILTER (WHERE g.operator_class = 'E') AS count_extra
+            FROM geo_licenses g
+            LEFT JOIN state_fips_lookup s
+                ON LPAD(CAST(g.state_fips AS VARCHAR), 2, '0') = s.state_fips
+            WHERE g.state_fips IS NOT NULL
+            GROUP BY LPAD(CAST(g.state_fips AS VARCHAR), 2, '0'), s.state
             ORDER BY license_count DESC
             """
         )
@@ -117,37 +131,22 @@ def aggregate(
             f"""
             CREATE OR REPLACE TABLE metrics_county AS
             SELECT
-                county_fips,
-                ANY_VALUE(state_fips) AS state_fips,
-                ANY_VALUE(state) AS state,
-                ANY_VALUE(county_name) AS county_name,
-                ANY_VALUE(county_population) AS population,
+                LPAD(CAST(g.county_fips AS VARCHAR), 5, '0') AS county_fips,
+                ANY_VALUE(LPAD(CAST(g.state_fips AS VARCHAR), 2, '0')) AS state_fips,
                 COUNT(*) AS license_count,
                 COUNT(*) FILTER (
-                    WHERE grant_date IS NOT NULL
-                      AND grant_date > DATE '{as_of_s}' - INTERVAL {m} MONTH
-                      AND grant_date <= DATE '{as_of_s}'
+                    WHERE g.grant_date IS NOT NULL
+                      AND g.grant_date > DATE '{as_of_s}' - INTERVAL {m} MONTH
+                      AND g.grant_date <= DATE '{as_of_s}'
                 ) AS new_grants,
                 ROUND(
-                    100000.0 * COUNT(*) / NULLIF(ANY_VALUE(county_population), 0),
-                    2
-                ) AS licenses_per_100k,
-                ROUND(
-                    100000.0 * COUNT(*) FILTER (
-                        WHERE grant_date IS NOT NULL
-                          AND grant_date > DATE '{as_of_s}' - INTERVAL {m} MONTH
-                          AND grant_date <= DATE '{as_of_s}'
-                    ) / NULLIF(ANY_VALUE(county_population), 0),
-                    2
-                ) AS new_grants_per_100k,
-                ROUND(
-                    100.0 * COUNT(*) FILTER (WHERE operator_class = 'E')
+                    100.0 * COUNT(*) FILTER (WHERE g.operator_class = 'E')
                         / NULLIF(COUNT(*), 0),
                     2
                 ) AS pct_extra
-            FROM geo_licenses
-            WHERE county_fips IS NOT NULL
-            GROUP BY county_fips
+            FROM geo_licenses g
+            WHERE g.county_fips IS NOT NULL
+            GROUP BY LPAD(CAST(g.county_fips AS VARCHAR), 5, '0')
             ORDER BY license_count DESC
             """
         )
@@ -204,17 +203,18 @@ def aggregate(
                     ELSE NULL
                 END AS new_grants_per_100k,
                 m.pct_extra,
-                m.state,
+                s.state AS state,
                 {age_select}
             FROM (
                 SELECT
-                    county_fips,
-                    state_fips,
+                    LPAD(CAST(county_fips AS VARCHAR), 5, '0') AS county_fips,
+                    LPAD(CAST(state_fips AS VARCHAR), 2, '0') AS state_fips,
                     name AS county_name,
                     CAST(population AS BIGINT) AS population
                 FROM read_csv_auto('{_sql(county_pop_csv)}', header=true)
             ) p
             LEFT JOIN metrics_county m ON p.county_fips = m.county_fips
+            LEFT JOIN state_fips_lookup s ON p.state_fips = s.state_fips
             {age_join}
             """
         )
