@@ -1,5 +1,14 @@
 # ham-analysis
 
+## ➡️ [**View the live maps and tables → swilcox.github.io/ham-analysis**](https://swilcox.github.io/ham-analysis/) ⬅️
+
+[![Live site](https://img.shields.io/badge/Live%20site-swilcox.github.io%2Fham--analysis-blue?style=for-the-badge)](https://swilcox.github.io/ham-analysis/)
+[![Monthly site build](https://github.com/swilcox/ham-analysis/actions/workflows/monthly-pages.yml/badge.svg)](https://github.com/swilcox/ham-analysis/actions/workflows/monthly-pages.yml)
+
+> **The site is rebuilt automatically on the 1st of every month** (12:00 UTC) from the latest FCC ULS and US Census data — no need to run anything locally to see current results. The build date for the data you're looking at is shown on the site itself.
+
+---
+
 Geographic analysis of **US amateur radio licenses** using public **FCC ULS** data and **US Census** population / boundaries.
 
 Maps and tables answer questions like:
@@ -55,17 +64,19 @@ ham all
 | `outputs/tables/metrics_county.csv` | County metrics (all counties; zeros where none) |
 | `outputs/maps/*.html` | Interactive Plotly choropleths (MapLibre; open in a browser) |
 | `outputs/site/index.html` | Landing page + copied maps/tables for GitHub Pages |
+| `data/processed/*.parquet` | Intermediate tables (licenses, geo join, metrics) |
 
 ## GitHub Pages (monthly refresh)
 
-Yes — this repo is set up for that.
+**Published site: <https://swilcox.github.io/ham-analysis/>**
+
+A [monthly cron](.github/workflows/monthly-pages.yml) (1st of each month, 12:00 UTC) re-downloads FCC/Census data, rebuilds the maps, and deploys `outputs/site/` to Pages. It can also be run on demand from **Actions → “Monthly site build” → Run workflow**.
+
+To set this up on your own fork:
 
 1. **Create the GitHub repo** and push this project (public is easiest for free Pages + Actions).
 2. **Enable Pages from Actions:** repo **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. **Run once manually:** **Actions → “Monthly site build” → Run workflow** (or push the workflow file and use `workflow_dispatch`).
-4. **Monthly cron** (1st of each month, 12:00 UTC) re-downloads FCC/Census data, rebuilds maps, and deploys `outputs/site/` to Pages.
-
-Workflow file: [`.github/workflows/monthly-pages.yml`](.github/workflows/monthly-pages.yml).
+3. **Run once manually** via `workflow_dispatch`, then let the cron take over. Your site lands at `https://<user>.github.io/<repo>/`.
 
 Local equivalent of what CI runs:
 
@@ -73,8 +84,6 @@ Local equivalent of what CI runs:
 ham all --months 12 --force
 # publishes under outputs/site/ (index.html, maps/, tables/, meta.json)
 ```
-
-Site URL will look like `https://<user>.github.io/<repo>/` once the deploy job succeeds.
 
 Choropleths use **simplified** Census boundaries and Plotly’s MapLibre renderer so pan/zoom stays responsive. County pages were ~23 MB with full-detail SVG geo; they should be much smaller after `ham map`.
 
@@ -85,7 +94,6 @@ Choropleths use **simplified** Census boundaries and Plotly’s MapLibre rendere
 - `county_licenses_per_100k_quantile.html`
 - `county_new_grants_per_100k_quantile.html`
 - `county_pct_65plus_quantile.html`
-| `data/processed/*.parquet` | Intermediate tables (licenses, geo join, metrics) |
 
 ### Incremental commands
 
