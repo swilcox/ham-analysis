@@ -5,6 +5,7 @@ from __future__ import annotations
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from time import sleep
 
 import httpx
 
@@ -22,7 +23,7 @@ NEEDED_DAT_FILES = ("HD.dat", "EN.dat", "AM.dat")
 
 
 def download_file(url: str, dest: Path, *, force: bool = False) -> Path:
-    """Stream-download url to dest unless it already exists."""
+    """Download atomically, allowing up to four attempts for temporary failures."""
     ensure_dirs()
     if dest.exists() and not force:
         print(f"  Using cached {dest}")
@@ -33,23 +34,39 @@ def download_file(url: str, dest: Path, *, force: bool = False) -> Path:
     print(f"  Downloading {url}")
     print(f"  → {dest}")
 
-    with httpx.stream("GET", url, follow_redirects=True, timeout=600.0) as resp:
-        resp.raise_for_status()
-        total = int(resp.headers.get("content-length") or 0)
-        written = 0
-        with tmp.open("wb") as f:
-            for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
-                f.write(chunk)
-                written += len(chunk)
-                if total:
-                    pct = 100.0 * written / total
-                    print(f"\r  {written / 1e6:.1f} / {total / 1e6:.1f} MB ({pct:.0f}%)", end="")
-                else:
-                    print(f"\r  {written / 1e6:.1f} MB", end="")
-        print()
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            with httpx.stream("GET", url, follow_redirects=True, timeout=600.0) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length") or 0)
+                written = 0
+                with tmp.open("wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        written += len(chunk)
+                        if total:
+                            pct = 100.0 * written / total
+                            print(f"\r  {written / 1e6:.1f} / {total / 1e6:.1f} MB ({pct:.0f}%)", end="")
+                        else:
+                            print(f"\r  {written / 1e6:.1f} MB", end="")
+                print()
 
-    tmp.replace(dest)
-    return dest
+            tmp.replace(dest)
+            return dest
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            # A failed forced refresh must leave the previous complete file intact.
+            # Restart transfers from zero so bytes from attempts cannot be mixed.
+            tmp.unlink(missing_ok=True)
+            retryable = not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code in {
+                500, 502, 503, 504,
+            }
+            if not retryable or attempt == attempts:
+                raise
+            delay = 5 * 2 ** (attempt - 1)
+            print(f"\n  Download attempt {attempt}/{attempts} failed: {exc}. "
+                  f"Retrying in {delay}s...", flush=True)
+            sleep(delay)
 
 
 def extract_uls_files(
