@@ -25,7 +25,8 @@ def geo_join(*, force: bool = False) -> Path:
     the FCC address is retained either way.
     """
     ensure_dirs()
-    if GEO_LICENSES_PARQUET.exists() and not force:
+    if (GEO_LICENSES_PARQUET.exists() and LICENSES_PARQUET.exists() and not force
+            and GEO_LICENSES_PARQUET.stat().st_mtime_ns >= LICENSES_PARQUET.stat().st_mtime_ns):
         print(f"  Using cached {GEO_LICENSES_PARQUET}")
         return GEO_LICENSES_PARQUET
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import typer
 
 from ham_analysis.config import DEFAULT_GROWTH_MONTHS, ensure_dirs
@@ -18,7 +20,7 @@ app = typer.Typer(
 def download_fcc_cmd(
     force: bool = typer.Option(False, "--force", help="Re-download even if cached"),
 ) -> None:
-    """Download and extract FCC amateur license dump (l_amat.zip)."""
+    """Download and extract FCC amateur license and application dumps."""
     from ham_analysis.download_fcc import download_fcc
 
     download_fcc(force=force)
@@ -158,11 +160,12 @@ def all_cmd(
     download_fcc(force=force)
     download_census(force=force)
     typer.echo("=== 2/7 Load ULS ===")
-    load_uls(force=force)
+    as_of = datetime.now(timezone.utc).date()
+    load_uls(force=force, as_of=as_of)
     typer.echo("=== 3/7 Geo join ===")
     geo_join(force=True)
     typer.echo("=== 4/7 Aggregate ===")
-    aggregate(months=months, force=True)
+    aggregate(months=months, force=True, as_of=as_of)
     typer.echo("=== 5/7 Maps ===")
     make_maps(months=months)
     typer.echo("=== 6/7 Age correlation ===")

@@ -28,7 +28,7 @@ Maps and tables answer questions like:
 
 ## Quick start
 
-Requires Python 3.11+ and network access for the first run (FCC dump is ~150–200 MB).
+Requires Python 3.11+ and network access for the first run (FCC license and application downloads total about 500 MB).
 
 ```bash
 # From the repo root
@@ -131,12 +131,67 @@ open outputs/tables/age_correlation.csv
 | Source | What we use |
 |--------|-------------|
 | [FCC ULS complete amateur licenses](https://data.fcc.gov/download/pub/uls/complete/l_amat.zip) | `HD.dat` (status, dates), `EN.dat` (address), `AM.dat` (operator class) |
+| [FCC ULS complete amateur applications](https://data.fcc.gov/download/pub/uls/complete/a_amat.zip) | `AD.dat` (purpose, status, receipt date), `HD.dat` (call sign), `EN.dat` (FRN) |
 | [Census Population Estimates](https://www2.census.gov/programs-surveys/popest/datasets/) (`co-est2024-alldata.csv`) | Total population by state and county (no API key) |
 | Census county age/sex estimates (`cc-est2024-agesex-all.csv`) | Median age and population 65+ by county |
 | Census Cartographic Boundary Files (500k) | State/county polygons for maps |
 | Census 2020 ZCTA–county relationship | ZIP/ZCTA → county FIPS |
 
-Active licenses only (`license_status = 'A'`). One row per call sign (highest system id among actives). Licensee entity rows only (`entity_type = 'L'`).
+### License counting
+
+ULS status `A` alone includes licenses past their expiration date. We classify
+each `A` record before calculating any metrics. One row per call sign (highest
+system ID among `A` records), with licensee entity rows only (`entity_type = 'L'`).
+The UTC analysis date is recorded in `data/processed/license_status.json` and on
+the site. This is an analysis of the downloaded snapshot, not reconstruction of
+historical license status.
+
+| Category | Counted? | Rule |
+|----------|----------|------|
+| Unexpired | Yes | Expiration date is on or after the analysis date |
+| Continued | Yes | Past expiration, with a supported timely renewal still pending |
+| Grace | No | Less than two calendar years past expiration, without a matching nonfinal renewal |
+| Expired | No | At least two calendar years past expiration, without a matching nonfinal renewal |
+| Unresolved | No | Missing expiration, contradictory cancellation date, or a renewal whose eligibility cannot be established |
+
+**Pending renewals:** Match application HD/AD/EN by application system ID, then
+match the license by **call sign and FCC registration number (FRN)**. Application
+and license system IDs are different. Recognize renewal (`RO`), renewal/modification
+(`RM`), and amendments (`AM`) whose original purpose is `RO` or `RM`. Use the latest
+version of each application file number and its earliest available receipt date;
+a dismissed or withdrawn later version cannot revive an older pending version.
+Statuses `1` and `2` (pending) and `R` (returned for correction, not a final
+disposition) qualify. Unknown nonfinal statuses go to review. Receipt must be
+within the current license term and on or before the applicable renewal deadline,
+and no later than the analysis date. Multiple applications never multiply a license.
+
+Normally the deadline is the expiration date. We also support the
+[FCC's DA-25-943 extension](https://docs.fcc.gov/public/attachments/DA-25-943A1.pdf):
+renewals originally due October 1, 2025 through March 5, 2026 were extended to
+March 5, 2026. Other individual waivers, disaster extensions, appeals, and missing
+application history are not automatically resolved. Apparently late pending
+renewals are retained for review rather than treated as proof of continued
+authority. Grace/expired categories describe the available records, not a legal
+determination about every possible exception.
+
+The rules distinguish continued authority for a proper timely renewal
+([47 CFR §1.62](https://www.law.cornell.edu/cfr/text/47/1.62)) from the two-year
+filing grace period, which alone confers no operating privileges
+([47 CFR §97.21](https://www.law.cornell.edu/cfr/text/47/97.21)). Field positions
+come from the [FCC data definitions](https://wireless.fcc.gov/wtbfiles/pa_ddef51.pdf).
+
+**Audit outputs:** `outputs/tables/license_status_counts.csv` breaks categories
+down by FCC mailing state; `license_review.csv` lists unresolved call signs and
+reasons. These states may differ from the maps' ZIP-based placement. All classified
+records remain in `data/processed/license_classifications.parquet`. Both CSVs are
+included on the generated site. The loader requires application data and rejects
+malformed input instead of silently falling back to status-only counts.
+
+The downloader fetches both FCC archives and rejects release dates more than two
+days apart (the FCC generates the files on different days of the same weekend).
+Classification caches include the analysis date and input file fingerprints;
+downstream geography and metrics rebuild after the license table changes.
+After updating, run `ham all --force` to refresh all data and outputs.
 
 ## Development
 
@@ -162,6 +217,13 @@ tests/                # fixture-based unit tests
 - ZCTA / metro density maps
 - **RBN** (Reverse Beacon Network) activity joined to call signs
 - Streamlit or a small web UI
+
+## Acknowledgments
+
+Thanks to **Rob, K4HST**, for helping review the accuracy of the FCC data and
+explaining how to count active amateur radio licenses accurately. His guidance
+on expiration dates, the two-year renewal grace period, and pending renewals
+helped improve this project's license counts and documentation.
 
 ## License
 

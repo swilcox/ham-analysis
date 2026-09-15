@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -11,6 +13,7 @@ from ham_analysis.config import (
     FCC_RAW_DIR,
     LICENSES_PARQUET,
     PROCESSED_DIR,
+    OUTPUT_TABLES,
     ensure_dirs,
 )
 
@@ -130,22 +133,39 @@ def _columns_sql(columns: list[str]) -> str:
     return "{" + ", ".join(f"'{c}': 'VARCHAR'" for c in columns) + "}"
 
 
-def load_uls(*, force: bool = False) -> Path:
+def load_uls(*, force: bool = False, as_of: date | None = None) -> Path:
     """
     Load HD + EN + AM into DuckDB and write licenses.parquet.
 
-    Active licenses only (status = 'A'). One row per call_sign, preferring
+    Unexpired A records and supported pending renewals. One row per call_sign, preferring
     the highest unique_system_identifier among actives. Licensee entity only
     (entity_type = 'L').
     """
     ensure_dirs()
-    if LICENSES_PARQUET.exists() and DUCKDB_PATH.exists() and not force:
-        print(f"  Using cached {LICENSES_PARQUET}")
-        return LICENSES_PARQUET
-
+    as_of = as_of or datetime.now(timezone.utc).date()
     hd_path = _dat_path("HD.dat")
     en_path = _dat_path("EN.dat")
     am_path = _dat_path("AM.dat")
+    app_paths = [FCC_RAW_DIR / "applications" / name for name in ("AD.dat", "HD.dat", "EN.dat")]
+    for path in app_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing {path}. Run `ham download-fcc` first; renewal data is required.")
+    metadata_path = PROCESSED_DIR / "license_status.json"
+    fingerprint = {
+        "version": 1,
+        "as_of": as_of.isoformat(),
+        "inputs": {str(p): [p.stat().st_size, p.stat().st_mtime_ns]
+                   for p in [hd_path, en_path, am_path, *app_paths]},
+    }
+    cache_outputs = [LICENSES_PARQUET, DUCKDB_PATH, metadata_path,
+                     PROCESSED_DIR / "license_classifications.parquet",
+                     OUTPUT_TABLES / "license_status_counts.csv",
+                     OUTPUT_TABLES / "license_review.csv"]
+    if all(p.exists() for p in cache_outputs) and not force:
+        cached = json.loads(metadata_path.read_text())
+        if cached.get("fingerprint") == fingerprint:
+            print(f"  Using cached {LICENSES_PARQUET}")
+            return LICENSES_PARQUET
 
     print("  Loading ULS into DuckDB (this may take a minute)...")
     if DUCKDB_PATH.exists():
@@ -160,7 +180,7 @@ def load_uls(*, force: bool = False) -> Path:
             header=false,
             auto_detect=false,
             quote='',
-            ignore_errors=true,
+            ignore_errors=false,
             nullstr='',
             encoding='utf-8',
             null_padding=true,
@@ -238,6 +258,7 @@ def load_uls(*, force: bool = False) -> Path:
                     TRIM(city) AS city,
                     UPPER(TRIM(state)) AS state,
                     SUBSTRING(REGEXP_REPLACE(COALESCE(zip_code, ''), '[^0-9]', '', 'g'), 1, 5) AS zip5,
+                    NULLIF(TRIM(frn), '') AS frn,
                     TRIM(applicant_type_code) AS applicant_type_code
                 FROM en_raw
                 WHERE TRIM(entity_type) = 'L'
@@ -255,6 +276,7 @@ def load_uls(*, force: bool = False) -> Path:
                 h.radio_service_code,
                 h.grant_date,
                 h.expired_date,
+                h.cancellation_date,
                 h.effective_date,
                 h.last_action_date,
                 a.operator_class,
@@ -264,12 +286,34 @@ def load_uls(*, force: bool = False) -> Path:
                 e.city,
                 e.state,
                 e.zip5,
-                e.applicant_type_code
+                e.applicant_type_code,
+                e.frn
             FROM hd_one h
             LEFT JOIN en e ON h.system_id = e.system_id
             LEFT JOIN am a ON h.system_id = a.system_id
             """
         )
+
+        from ham_analysis.renewals import classify_licenses
+
+        classify_licenses(con, FCC_RAW_DIR / "applications", as_of,
+                          common_opts=common_opts, hd_columns=HD_COLUMNS, en_columns=EN_COLUMNS)
+        OUTPUT_TABLES.mkdir(parents=True, exist_ok=True)
+        con.execute(f"COPY license_classifications TO '{_sql_path(PROCESSED_DIR / 'license_classifications.parquet')}' (FORMAT PARQUET)")
+        con.execute(f"""
+            COPY (SELECT state AS fcc_mailing_state, license_category, COUNT(*) AS license_count
+                  FROM license_classifications GROUP BY ALL ORDER BY 1, 2)
+            TO '{_sql_path(OUTPUT_TABLES / 'license_status_counts.csv')}' (HEADER, DELIMITER ',')
+        """)
+        con.execute(f"""
+            COPY (SELECT call_sign, system_id, state AS fcc_mailing_state, expired_date,
+                         renewal_file_number, renewal_received_date, renewal_status, renewal_basis
+                  FROM license_classifications WHERE license_category = 'unresolved'
+                  ORDER BY state, call_sign)
+            TO '{_sql_path(OUTPUT_TABLES / 'license_review.csv')}' (HEADER, DELIMITER ',')
+        """)
+        counts = dict(con.execute("SELECT license_category, COUNT(*) FROM license_classifications GROUP BY 1").fetchall())
+        print(f"  License classification as of {as_of}: {counts}")
 
         n = con.execute("SELECT COUNT(*) FROM licenses").fetchone()[0]
         n_state = con.execute(
@@ -286,6 +330,8 @@ def load_uls(*, force: bool = False) -> Path:
         con.execute(
             f"COPY licenses TO '{_sql_path(LICENSES_PARQUET)}' (FORMAT PARQUET)"
         )
+        metadata_path.write_text(json.dumps({"fingerprint": fingerprint, "as_of": as_of.isoformat(),
+                                             "counts": counts}, indent=2) + "\n")
         print(f"  → {LICENSES_PARQUET}")
     finally:
         con.close()

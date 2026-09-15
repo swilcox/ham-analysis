@@ -39,6 +39,9 @@ def aggregate(
     if (
         METRICS_STATE_PARQUET.exists()
         and METRICS_COUNTY_PARQUET.exists()
+        and GEO_LICENSES_PARQUET.exists()
+        and min(METRICS_STATE_PARQUET.stat().st_mtime_ns,
+                METRICS_COUNTY_PARQUET.stat().st_mtime_ns) >= GEO_LICENSES_PARQUET.stat().st_mtime_ns
         and not force
     ):
         print(f"  Using cached metrics (delete or pass --force to rebuild)")

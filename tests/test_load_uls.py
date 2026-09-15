@@ -32,6 +32,10 @@ def pipeline_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     for name in ("HD.dat", "EN.dat", "AM.dat"):
         shutil.copy(FIXTURES / name, raw_fcc / name)
+    applications = raw_fcc.parent / "applications"
+    applications.mkdir()
+    for name in ("AD.dat", "HD.dat", "EN.dat"):
+        (applications / name).write_text("")
 
     # Minimal ZIP→county crosswalk (ZIPs used in fixtures)
     (external / "zip_to_county.csv").write_text(
@@ -123,7 +127,7 @@ def pipeline_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_load_uls_filters_inactive_and_joins(pipeline_env: Path):
-    path = load_uls(force=True)
+    path = load_uls(force=True, as_of=date(2025, 1, 1))
     assert path.exists()
 
     con = duckdb.connect()
@@ -139,7 +143,7 @@ def test_load_uls_filters_inactive_and_joins(pipeline_env: Path):
 
 
 def test_geo_and_aggregate(pipeline_env: Path):
-    load_uls(force=True)
+    load_uls(force=True, as_of=date(2025, 1, 1))
     geo_join(force=True)
     state_p, county_p = aggregate(
         months=12, force=True, as_of=date(2025, 1, 1)
@@ -172,7 +176,7 @@ def test_metrics_state_from_fips_not_fcc_address(pipeline_env: Path):
     Regression: KF6KAL has FCC state=CA but ZIP 99156 → Pend Oreille, WA.
     Metrics must label the county WA, never CA via ANY_VALUE(state).
     """
-    load_uls(force=True)
+    load_uls(force=True, as_of=date(2025, 1, 1))
     geo_join(force=True)
     _, county_p = aggregate(months=12, force=True, as_of=date(2025, 1, 1))
 
@@ -215,7 +219,7 @@ def test_metrics_state_from_fips_not_fcc_address(pipeline_env: Path):
 def test_analyze_age(pipeline_env: Path):
     from ham_analysis.analyze_age import analyze_age
 
-    load_uls(force=True)
+    load_uls(force=True, as_of=date(2025, 1, 1))
     geo_join(force=True)
     aggregate(months=12, force=True, as_of=date(2025, 1, 1))
     corr_path, scatter_path = analyze_age(min_population=100)
@@ -224,3 +228,130 @@ def test_analyze_age(pipeline_env: Path):
     corr = corr_path.read_text(encoding="utf-8")
     assert "median_age" in corr
     assert "pearson_r" in corr
+
+
+def _append_dat(path, columns, values):
+    row = [''] * len(columns)
+    for key, value in values.items():
+        row[columns.index(key)] = str(value)
+    with path.open('a') as f:
+        # FCC adds trailing fields; required fields must keep their positions.
+        f.write('|'.join(row) + '|extra|\n')
+
+
+def _renewal_fixture(root, *, expiration='06/01/2025', status='2', purpose='RO',
+                     received='05/20/2025', app_frn='123', license_frn='123',
+                     original_purpose='', application_id=9001, file_number='000009001',
+                     add_license=True, cancellation='', license_status='A'):
+    from ham_analysis.load_uls import HD_COLUMNS, EN_COLUMNS
+    from ham_analysis.renewals import AD_COLUMNS
+    fcc = root / 'data/raw/fcc'
+    if add_license:
+        _append_dat(fcc / 'extract/HD.dat', HD_COLUMNS, dict(
+            record_type='HD', unique_system_identifier=2000, call_sign='TEST',
+            license_status=license_status, radio_service_code='HA', grant_date='06/01/2015',
+            expired_date=expiration, cancellation_date=cancellation))
+        _append_dat(fcc / 'extract/EN.dat', EN_COLUMNS, dict(
+            record_type='EN', unique_system_identifier=2000, call_sign='TEST',
+            entity_type='L', state='MA', zip_code='02108', frn=license_frn))
+    if status is None:
+        return
+    _append_dat(fcc / 'applications/AD.dat', AD_COLUMNS, dict(
+        record_type='AD', unique_system_identifier=application_id, uls_file_number=file_number,
+        purpose=purpose, status=status, receipt_date=received, original_purpose=original_purpose))
+    _append_dat(fcc / 'applications/HD.dat', HD_COLUMNS, dict(
+        record_type='HD', unique_system_identifier=application_id, uls_file_number=file_number,
+        call_sign='TEST', radio_service_code='HA'))
+    _append_dat(fcc / 'applications/EN.dat', EN_COLUMNS, dict(
+        record_type='EN', unique_system_identifier=application_id, entity_type='L', frn=app_frn))
+
+
+@pytest.mark.parametrize('kwargs,category', [
+    ({}, 'continued'),
+    ({'purpose': 'RM'}, 'continued'),
+    ({'purpose': 'AM', 'original_purpose': 'RO'}, 'continued'),
+    ({'status': '1'}, 'continued'),
+    ({'status': 'R'}, 'continued'),
+    ({'received': '06/01/2025'}, 'continued'),
+    ({'status': None}, 'grace'),
+    ({'status': 'D'}, 'grace'),
+    ({'status': 'G'}, 'grace'),
+    ({'status': 'W'}, 'grace'),
+    ({'status': 'I'}, 'grace'),
+    ({'status': 'T'}, 'grace'),
+    ({'purpose': 'MD'}, 'grace'),
+    ({'purpose': 'AM', 'original_purpose': 'MD'}, 'grace'),
+    ({'received': '06/02/2025'}, 'unresolved'),
+    ({'received': ''}, 'unresolved'),
+    ({'status': 'Z'}, 'unresolved'),
+    ({'app_frn': ''}, 'unresolved'),
+    ({'license_frn': ''}, 'unresolved'),
+    ({'app_frn': '999'}, 'grace'),
+    ({'received': '05/20/2014'}, 'grace'),  # An earlier license term.
+    ({'received': '09/16/2026'}, 'grace'),  # Application after analysis date.
+    ({'expiration': ''}, 'unresolved'),
+    ({'expiration': 'bad date'}, 'unresolved'),
+    ({'cancellation': '09/01/2026'}, 'unresolved'),
+    ({'expiration': '09/15/2026', 'status': None}, 'unexpired'),
+    ({'expiration': '09/14/2026', 'status': None}, 'grace'),
+    ({'expiration': '09/15/2024', 'status': None}, 'expired'),
+    ({'expiration': '09/16/2024', 'status': None}, 'grace'),
+    ({'expiration': '06/01/2020', 'received': '05/20/2020'}, 'continued'),
+    ({'expiration': '10/01/2025', 'received': '03/05/2026'}, 'continued'),
+    ({'expiration': '10/01/2025', 'received': '03/06/2026'}, 'unresolved'),
+    ({'expiration': '09/30/2025', 'received': '03/05/2026'}, 'unresolved'),
+])
+def test_license_classification(pipeline_env, kwargs, category):
+    _renewal_fixture(pipeline_env, **kwargs)
+    load_uls(force=True, as_of=date(2026, 9, 15))
+    with duckdb.connect() as con:
+        actual = con.execute(f"SELECT license_category FROM '{config.PROCESSED_DIR}/license_classifications.parquet' WHERE call_sign='TEST'").fetchone()[0]
+        counted = con.execute(f"SELECT count(*) FROM '{config.LICENSES_PARQUET}' WHERE call_sign='TEST'").fetchone()[0]
+    assert actual == category
+    assert counted == (category in ('unexpired', 'continued'))
+
+
+def test_amendment_uses_original_receipt_and_latest_status(pipeline_env):
+    _renewal_fixture(pipeline_env, status='I')
+    _renewal_fixture(pipeline_env, add_license=False, application_id=9002,
+                     purpose='AM', original_purpose='RO', received='07/01/2025')
+    load_uls(as_of=date(2026, 9, 15))
+    with duckdb.connect() as con:
+        row = con.execute(f"SELECT renewal_received_date, license_category FROM '{config.LICENSES_PARQUET}' WHERE call_sign='TEST'").fetchone()
+    assert row == (date(2025, 5, 20), 'continued')
+    # A newer withdrawal must invalidate the cached result and the older version.
+    _renewal_fixture(pipeline_env, add_license=False, application_id=9003,
+                     purpose='WD', status='W', received='08/01/2025')
+    load_uls(as_of=date(2026, 9, 15))
+    with duckdb.connect() as con:
+        assert con.execute(f"SELECT count(*) FROM '{config.LICENSES_PARQUET}' WHERE call_sign='TEST'").fetchone()[0] == 0
+
+
+def test_multiple_applications_do_not_duplicate_license(pipeline_env):
+    _renewal_fixture(pipeline_env)
+    _renewal_fixture(pipeline_env, add_license=False, application_id=9002, file_number='000009002')
+    load_uls(as_of=date(2026, 9, 15))
+    geo_join()
+    states, _ = aggregate(as_of=date(2026, 9, 15))
+    with duckdb.connect() as con:
+        assert con.execute(f"SELECT count(*) FROM '{config.LICENSES_PARQUET}' WHERE call_sign='TEST'").fetchone()[0] == 1
+        assert con.execute(f"SELECT license_count FROM '{states}' WHERE state='MA'").fetchone()[0] == 3
+
+
+def test_date_change_invalidates_loader_and_downstream_caches(pipeline_env):
+    _renewal_fixture(pipeline_env, expiration='09/15/2026', status=None)
+    load_uls(as_of=date(2026, 9, 15))
+    geo_join()
+    aggregate(as_of=date(2026, 9, 15))
+    load_uls(as_of=date(2026, 9, 16))
+    geo_join()
+    states, _ = aggregate(as_of=date(2026, 9, 16))
+    with duckdb.connect() as con:
+        assert con.execute(f"SELECT license_count FROM '{states}' WHERE state='MA'").fetchone()[0] == 2
+
+
+def test_missing_application_data_fails_instead_of_using_old_counts(pipeline_env):
+    load_uls(as_of=date(2026, 9, 15))
+    (pipeline_env / 'data/raw/fcc/applications/AD.dat').unlink()
+    with pytest.raises(FileNotFoundError, match='renewal data is required'):
+        load_uls(as_of=date(2026, 9, 15))

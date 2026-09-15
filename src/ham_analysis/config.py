@@ -32,6 +32,8 @@ AGE_SCATTER_HTML = OUTPUT_MAPS / "county_density_vs_median_age.html"
 # FCC ULS — weekly complete amateur license dump
 FCC_AMAT_LICENSE_URL = "https://data.fcc.gov/download/pub/uls/complete/l_amat.zip"
 FCC_AMAT_ZIP_NAME = "l_amat.zip"
+FCC_AMAT_APPLICATION_URL = "https://data.fcc.gov/download/pub/uls/complete/a_amat.zip"
+FCC_AMAT_APPLICATION_ZIP_NAME = "a_amat.zip"
 
 # Population: Census Population Estimates (co-est) — see download_census.py
 # (ACS API now requires a key; PopEst CSVs are key-free.)

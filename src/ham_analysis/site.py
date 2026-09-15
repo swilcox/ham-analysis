@@ -15,6 +15,8 @@ from ham_analysis.config import (
     DEFAULT_GROWTH_MONTHS,
     FCC_AMAT_LICENSE_URL,
     FCC_AMAT_ZIP_NAME,
+    FCC_AMAT_APPLICATION_URL,
+    FCC_AMAT_APPLICATION_ZIP_NAME,
     FCC_RAW_DIR,
     OUTPUT_MAPS,
     OUTPUT_TABLES,
@@ -184,12 +186,19 @@ def collect_metadata(*, growth_months: int = DEFAULT_GROWTH_MONTHS) -> dict:
         except Exception:
             active_count = None
 
+    classification_path = licenses.parent / "license_status.json"
+    classification = {}
+    if classification_path.exists():
+        saved = json.loads(classification_path.read_text())
+        classification = {"as_of": saved["as_of"], "counts": saved["counts"]}
+
     generated_at = datetime.now(tz=timezone.utc)
     return {
         "generated_at_utc": generated_at.strftime("%Y-%m-%d %H:%M UTC"),
         "generated_date": generated_at.strftime("%Y-%m-%d"),
         "growth_months": growth_months,
         "active_license_count": active_count,
+        "license_classification": classification,
         "sources": {
             "fcc_uls": {
                 "name": "FCC Universal Licensing System — Amateur complete licenses",
@@ -198,9 +207,16 @@ def collect_metadata(*, growth_months: int = DEFAULT_GROWTH_MONTHS) -> dict:
                 "downloaded_at": _file_mtime_iso(fcc_zip),
                 "downloaded_date": _file_mtime_date(fcc_zip),
                 "note": (
-                    "Weekly public dump (l_amat.zip). Active licenses only "
-                    "(status A). Geography is mailing address on the license."
+                    "Weekly public dump. Counts include unexpired A records and supported "
+                    "timely pending renewals; grace-period and unresolved records are excluded. "
+                    "Geography is mailing address on the license."
                 ),
+            },
+            "fcc_applications": {
+                "name": "FCC ULS — Amateur complete applications",
+                "url": FCC_AMAT_APPLICATION_URL,
+                "file": FCC_AMAT_APPLICATION_ZIP_NAME,
+                "downloaded_at": _file_mtime_iso(FCC_RAW_DIR / FCC_AMAT_APPLICATION_ZIP_NAME),
             },
             "census_popest": {
                 "name": "Census Bureau Population Estimates (county/state)",
@@ -299,6 +315,19 @@ def _render_index(
     active = meta.get("active_license_count")
     active_s = f"{active:,}" if isinstance(active, int) else "n/a"
     growth = meta.get("growth_months", DEFAULT_GROWTH_MONTHS)
+
+    classification = meta.get("license_classification", {})
+    status_counts = classification.get("counts", {})
+    classification_rows = "".join(
+        f"<tr><th>{label}</th><td>{status_counts.get(key, 0):,}</td></tr>"
+        for key, label in [
+            ("unexpired", "Unexpired — included"),
+            ("continued", "Pending timely renewal — included"),
+            ("grace", "Within two years past expiration — excluded"),
+            ("expired", "Two or more years past expiration — excluded"),
+            ("unresolved", "Unresolved — excluded; see license_review.csv"),
+        ]
+    ) if classification else "<tr><td>Rebuild the pipeline to classify licenses.</td></tr>"
 
     # Group catalog entries that exist on disk
     by_section: dict[str, list[MapPage]] = {s: [] for s in SECTION_ORDER}
@@ -498,11 +527,18 @@ def _render_index(
 
   <main class="wrap">
     <section class="callout warn">
-      <strong>Read this first.</strong> Map geography is the <em>mailing address on the
+      <strong>Read this first.</strong>
+      <p>The FCC may still label a license “Active” after it expires. Our counts
+      exclude expired licenses, including those in the two-year renewal grace period,
+      unless the data supports continued operating authority through a timely pending
+      renewal. The grace period allows renewal but does not itself authorize transmitting.
+      Unresolved cases are excluded and listed for review.
+      <a href="#license-counting">See which licenses are counted below.</a></p>
+      <p>Map geography is the <em>mailing address on the
       FCC license</em>, not proven station location (PO boxes, clubs, and stale addresses
       matter). Growth means <em>new grant dates</em> in the last {growth} months among
       currently active licenses — not net change after expirations. FCC public dumps
-      do <em>not</em> include licensee ages; age maps describe the whole county population.
+      do <em>not</em> include licensee ages; age maps describe the whole county population.</p>
     </section>
 
     <h2>Data freshness</h2>
@@ -519,6 +555,18 @@ def _render_index(
       (UTC file timestamps). The FCC publishes a weekly complete amateur license file;
       this project is intended to refresh monthly via GitHub Actions.
     </p>
+
+    <h2 id="license-counting">Which licenses are counted?</h2>
+    <p>Classification date: {escape(classification.get("as_of", "unavailable"))}.
+      Active counts include unexpired licenses and expired-date licenses with a
+      supported timely renewal still pending, including applications returned for correction.
+      A two-year renewal grace period alone does not confer operating privileges.</p>
+    <table class="meta">{classification_rows}</table>
+    <p>Renewals are matched by call sign and FCC registration number. The documented
+      2025–26 renewal deadline extension is included. Other extensions, missing data,
+      and ambiguous renewals may need review; these counts do not resolve every
+      individual licensing case. Status tables use FCC mailing states; map states
+      follow ZIP-to-county placement.</p>
 
     <h2>Maps</h2>
     <p>
@@ -537,7 +585,9 @@ def _render_index(
       <li>
         <strong>FCC ULS</strong> —
         <a href="{escape(fcc["url"])}">Amateur complete license dump</a>
-        ({escape(fcc["file"])}). {escape(fcc["note"])}
+        ({escape(fcc["file"])}), plus
+        <a href="{FCC_AMAT_APPLICATION_URL}">amateur applications</a>
+        ({FCC_AMAT_APPLICATION_ZIP_NAME}). {escape(fcc["note"])}
       </li>
       <li>
         <strong>Census Population Estimates</strong> —
@@ -562,7 +612,7 @@ def _render_index(
     <h2>Methods (short)</h2>
     <div class="callout">
       <ul>
-        <li>Keep active amateur licenses only; one row per call sign.</li>
+        <li>Keep unexpired A records and supported timely pending renewals; one row per call sign.</li>
         <li>Join licensee ZIP to county via ZCTA relationship file.</li>
         <li>Per-capita rates use Census county/state population estimates.</li>
         <li>“New grants” = grant_date within the configured rolling window.</li>
